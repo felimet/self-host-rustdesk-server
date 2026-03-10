@@ -40,36 +40,38 @@
 
 ```mermaid
 flowchart LR
-    subgraph Clients ["📱 客戶端 (Clients)"]
-        direction TB
-        RC["RustDesk App<br>(直連軟體)"]
-        Web["Web 瀏覽器<br>(管理員後台)"]
+
+    subgraph C["📱 客戶端"]
+        direction LR
+        RC["RustDesk App<br/>(直連軟體)"]
+        Web["Web 瀏覽器<br/>(管理員後台)"]
     end
 
-    subgraph Cloudflare ["☁️ Cloudflare 網路"]
-        CF["Cloudflare Edge<br>(TLS / WAF / DDoS)"]
+    subgraph CFNET["☁️ Cloudflare 網路"]
+        direction LR
+        CF["Cloudflare Edge<br/>(TLS / WAF / DDoS)"]
     end
 
-    subgraph Server ["🖥️ 實驗室伺服器"]
+    subgraph LAB["🖥️ 實驗室伺服器"]
+        direction LR
         FW["主機防火牆 / Router NAT"]
-        
-        subgraph Docker ["🐳 Docker 共享網路 (network_mode: service)"]
-            direction TB
-            Cloudflared["cloudflared<br>(安全隧道起點)"]
-            Rustdesk["rustdesk-s6<br>(hbbs + hbbr + API)"]
+
+        subgraph DOCKER["🐳 Docker 共享網路 (network_mode: service)"]
+            direction LR
+            Cloudflared["cloudflared<br/>(安全隧道起點)"]
+            Rustdesk["rustdesk-s6<br/>(hbbs + hbbr + API)"]
         end
     end
 
     %% 客戶端直連
-    RC -- "TCP/UDP<br>21115-21117" --> FW
-    FW -. "Port Forwarding" .-> Rustdesk
-    
-    %% 管理員走 Tunnel
-    Web -- "HTTPS<br>rustdesk-console" --> CF
-    CF <-- "Outbound Encrypted Tunnel" --> Cloudflared
-    Cloudflared -- "127.0.0.1:21114" --> Rustdesk
+    RC --->|"21115–21117"| FW
+    FW --->|"Port Forwarding"| Rustdesk
 
-    %% 樣式定義
+    %% 管理員 / 使用者後台走 Tunnel
+    Web -->|"HTTPS console"| CF
+    CF <-->|"Tunnel"| Cloudflared
+    Cloudflared -->|"localhost:21114"| Rustdesk
+
     classDef app fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000
     classDef cf fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#000
     classDef firewall fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000
