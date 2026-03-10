@@ -1,0 +1,127 @@
+# RustDesk Server（社群版）— Self-Hosted
+#
+# 使用 lejianwen/rustdesk-server-s6 整合映像檔（hbbs + hbbr + API 合一）
+# 搭配 Cloudflare Tunnel 安全暴露 Web Console
+#
+# 專案來源：
+#   Server: https://github.com/lejianwen/rustdesk-server
+#   API:    https://github.com/lejianwen/rustdesk-api
+#
+# ===== 架構 =====
+#
+#   RustDesk 客戶端 ──TCP/UDP──→ 主機（直連 21115-21117, 21116/udp）
+#   瀏覽器           ──HTTPS──→ Cloudflare ──Tunnel──→ cloudflared → 127.0.0.1:21114
+#
+#   21114（Web Console/API）不需對外開放，由 Cloudflare Tunnel 處理。
+#
+# ===== 主機防火牆 / 路由器 Port Forwarding =====
+#
+#   Port        Protocol  用途                     需開放？
+#   21115/tcp   TCP       NAT 類型偵測              是
+#   21116/tcp   TCP       TCP 打洞                  是
+#   21116/udp   UDP       ID 註冊（核心）           是（不可省略）
+#   21117/tcp   TCP       Relay 中繼                是
+#   21118/tcp   TCP       WebSocket ID（可選）      Web 客戶端用
+#   21119/tcp   TCP       WebSocket Relay（可選）   Web 客戶端用
+#   21114/tcp   TCP       Web Console / API         不需要（走 Tunnel）
+#
+# ===== 使用前 =====
+#
+#   1. cp .env.example .env && 編輯 .env 填入所有必要變數
+#   2. docker compose up -d
+#   3. 取得公鑰：cat ./data/server/id_ed25519.pub
+#   4. 登入 https://rustdesk-console.example.com
+#      預設帳號: admin / 預設密碼: admin
+#      *** 首次登入後務必修改密碼 ***
+#
+
+services:
+  # ──────────────────────────────────────────────
+  # rustdesk: S6 整合映像檔（hbbs + hbbr + API）
+  # 單一容器包含 ID Server、Relay Server、Web Console API
+  # ──────────────────────────────────────────────
+  rustdesk:
+    container_name: rustdesk
+    image: lejianwen/rustdesk-server-s6:latest
+    ports:
+      - "21114:21114"     # Web Console / API
+      - "21115:21115"     # NAT 偵測
+      - "21116:21116"     # TCP 打洞
+      - "21116:21116/udp" # ID 註冊（核心）
+      - "21117:21117"     # Relay 中繼
+      - "21118:21118"     # WebSocket ID
+      - "21119:21119"     # WebSocket Relay
+    environment:
+      # ── hbbs / hbbr 基礎設定 ──
+      - RELAY=${RUSTDESK_DOMAIN}:21117
+      - ENCRYPTED_ONLY=1
+      - MUST_LOGIN=${MUST_LOGIN:-N}  # Y = 必須登入才能發起連線
+      - TZ=Asia/Taipei
+
+      # ── rustdesk-api：通用 ──
+      - RUSTDESK_API_LANG=zh-TW
+      - RUSTDESK_API_APP_WEB_CLIENT=1                     # 啟用 Web Client
+      - RUSTDESK_API_APP_REGISTER=${RUSTDESK_API_APP_REGISTER:-false}
+      - RUSTDESK_API_APP_SHOW_SWAGGER=0                   # 生產環境關閉 Swagger
+      - RUSTDESK_API_APP_TOKEN_EXPIRE=168h                # Token 有效 7 天
+      - RUSTDESK_API_APP_DISABLE_PWD_LOGIN=false
+      - RUSTDESK_API_APP_REGISTER_STATUS=1                # 註冊使用者預設啟用
+      - RUSTDESK_API_APP_CAPTCHA_THRESHOLD=3              # 登入錯誤 3 次後顯示驗證碼
+      - RUSTDESK_API_APP_BAN_THRESHOLD=10                 # 登入錯誤 10 次封禁 IP
+      - RUSTDESK_API_RUSTDESK_PERSONAL=0                  # 停用個人版 API:裝置必須登入帳號才能使用雲端功能(地址簿同步功能)。啟用:不需要帳號登入就能使用地址簿同步功能
+
+      # ── rustdesk-api：後台 Admin ──
+      - RUSTDESK_API_ADMIN_TITLE
+      - RUSTDESK_API_ADMIN_HELLO
+
+      # ── rustdesk-api：資料庫（預設 SQLite，可選 MySQL）──
+      - RUSTDESK_API_GORM_TYPE=sqlite
+      - RUSTDESK_API_GORM_MAX_IDLE_CONNS=10
+      - RUSTDESK_API_GORM_MAX_OPEN_CONNS=100
+
+      # ── rustdesk-api：RustDesk Server 連線資訊 ──
+      - RUSTDESK_API_RUSTDESK_ID_SERVER=${RUSTDESK_DOMAIN}:21116
+      - RUSTDESK_API_RUSTDESK_RELAY_SERVER=${RUSTDESK_DOMAIN}:21117
+      - RUSTDESK_API_RUSTDESK_API_SERVER=${RUSTDESK_API_SERVER}
+      - RUSTDESK_API_RUSTDESK_KEY_FILE=/data/id_ed25519.pub
+
+      # ── rustdesk-api：JWT ──
+      - RUSTDESK_API_JWT_KEY=${RUSTDESK_API_JWT_KEY}
+      - RUSTDESK_API_JWT_EXPIRE_DURATION=6h             # JWT 有效 6 小時
+
+      # ── rustdesk-api：Proxy（預設關閉）──
+      - RUSTDESK_API_PROXY_ENABLE=false
+
+      # ── rustdesk-api：GIN 信任代理（視需要調整）──
+      # - RUSTDESK_API_GIN_TRUST_PROXY=192.168.1.0/24
+
+    volumes:
+      - ./data/server:/data         # hbbs/hbbr 金鑰對與資料
+      - ./data/api:/app/data        # API 資料庫（SQLite）
+    networks:
+      - rustdesk-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  # ──────────────────────────────────────────────
+  # cloudflared: Cloudflare Tunnel
+  # 將 Web Console (21114) 安全暴露至公網
+  # ──────────────────────────────────────────────
+  cloudflared:
+    container_name: cloudflared
+    image: cloudflare/cloudflared:latest
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    network_mode: "service:rustdesk"  # 共享 rustdesk 容器的網路，可存取 127.0.0.1:21114
+    depends_on:
+      - rustdesk
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  rustdesk-net:
+    external: false
